@@ -11,6 +11,7 @@
 
 # Ignore secrets file
 secrets.h
-
+wifi.h
+kvv/wifi.h
 # Ignore build directories
 build/
