@@ -319,7 +319,7 @@ void setup() {
   if (https.begin(*client, "https://185.201.144.208/sl3-alone/XSLT_DM_REQUEST?"
         "outputFormat=JSON&coordOutputFormat=WGS84[dd.ddddd]&depType=stopEvents&"
         "locationServerActive=1&mode=direct&name_dm=7001103&type_dm=stop&"
-        "useOnlyStops=1&useRealtime=1&limit=6")) {
+        "useOnlyStops=1&useRealtime=1&limit=10")) {
     Serial.print("[HTTPS] GET...");
     int httpCode = https.GET();
     if (httpCode > 0) {
