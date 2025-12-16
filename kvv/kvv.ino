@@ -335,7 +335,7 @@ void setup() {
     }
   }
   Serial.println("Going to sleep ...");
-  ESP.deepSleep(0);
+ ESP.deepSleep(0);
 }
 
 void loop() {
