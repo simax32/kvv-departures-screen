@@ -1,6 +1,13 @@
-#define STOP_ID  "7001103"    // Knielinger Allee
-#define LIMIT "6"             // the epaper display can display six text lines
+/*
+   KVV ePaper Display - ESP8266
+   Anzeige der Abfahrtszeiten für die Haltestelle "Knielinger Allee" (7001002)
+   mit 2.9" tri-color eInk Display (GxEPD2_290_C90c, 90° gedreht)
+   Filtert Abfahrten in den nächsten 5 Minuten und zeigt lokale Namenskonvertierungen.
+   Dynamische Kürzung langer Zielnamen + Verspätungserkennung (rote Abfahrtszeit).
+*/
 
+#define STOP_ID  "7001002"    // Knielinger Allee
+#define LIMIT 11               // Maximale Anzahl der angezeigten Abfahrten
 
 #include "wifi.h"
 #include <Arduino.h>
@@ -11,24 +18,23 @@
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecureBearSSL.h>
+#include "FreeSansBold9pt8b.h"
 
-// Display pins
+// Display-Pins
 #define CS_PIN   15
 #define DC_PIN   4
 #define RST_PIN  5
 #define BUSY_PIN 16
 
-// Verwende die gedrehte Version des Displays
+// Display-Objekt (90° gedreht)
 GxEPD2_3C<GxEPD2_290_C90c, GxEPD2_290_C90c::HEIGHT> display(GxEPD2_290_C90c(CS_PIN, DC_PIN, RST_PIN, BUSY_PIN));
 ESP8266WiFiMulti WiFiMulti;
 
-// Anpassung für den gedrehten Modus
+// Anpassungen für den gedrehten Modus
 #define TOP 15
 #define LEFT 15
 #define SKIP 18
 #define COL0_WIDTH 36
-
-#include "FreeSansBold9pt8b.h"
 
 // UTF8-Decoder
 byte utf8ascii(byte ascii) {
@@ -64,6 +70,23 @@ uint16_t get_dsp_length(String str) {
   return w;
 }
 
+// Konvertiert Stop-Namen in lokale Dialektform oder kürzere Varianten
+String convertStopName(String stopName) {
+  if (stopName == "KA Tullastraße/Alter Schlachthof") return "Tullastr./VBK";
+  if (stopName == "Knielingen Nord über Hbf") return "Knielingen ü Hbf";
+  if (stopName == "Germersheim, Bahnhof") return "Germersheim";
+  if (stopName == "Rappenwört über Hbf") return "Rappele";
+  if (stopName == "Karlsruhe, Marktplatz") return "KA Marktplatz";
+  if (stopName == "Karlsruhe, Durlacher Tor") return "KA Durlacher Tor";
+  if (stopName == "Karlsruhe, Hauptbahnhof") return "KA Hbf";
+  if (stopName == "Söllingen (b. Karlsruhe)") return "Söllingen (b. KA)";
+  if (stopName == "Rheinstrandsiedlung (Umleitung)") return "Rheinstrandsiedl. (Uml)";
+  if (stopName == "Rheinstetten (Umleitung)") return "Rheinstetten (Uml)";
+  if (stopName == "KA Marktplatz (Pyramide U)") return "Marktplatz (Pyramide)";
+  if (stopName == "Karlsruhe Albtalbahnhof") return "Karlsruhe Albtalbhf";
+  return stopName;
+}
+
 void parse_time(struct tm *timeinfo, const JsonObject &obj) {
   memset(timeinfo, 0, sizeof(struct tm));
   if (obj.containsKey("year")) timeinfo->tm_year = atoi(obj["year"]) - 1900;
@@ -74,39 +97,39 @@ void parse_time(struct tm *timeinfo, const JsonObject &obj) {
 }
 
 void parse_reply(Stream &payload) {
-  int16_t x, y;
-  uint16_t w, h;
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(24576);
 
-  StaticJsonDocument<300> filter;
+  // Filter: Füge realDateTime und dateTime hinzu, um Verspätungen zu berechnen
+  StaticJsonDocument<512> filter;
   filter["dateTime"] = true;
   filter["dm"]["points"]["point"]["name"] = true;
-  filter["departureList"][0]["countdown"] = true;
-  filter["departureList"][0]["realDateTime"]["hour"] = true;
-  filter["departureList"][0]["realDateTime"]["minute"] = true;
-  filter["departureList"][0]["dateTime"]["hour"] = true;
-  filter["departureList"][0]["dateTime"]["minute"] = true;
-  filter["departureList"][0]["servingLine"]["direction"] = true;
-  filter["departureList"][0]["servingLine"]["symbol"] = true;
-  filter["departureList"][0]["realtimeStatus"] = true;
-  filter["departureList"][0]["realtimeTripStatus"] = true;
+  for (int i = 0; i < LIMIT; i++) {
+    filter["departureList"][i]["countdown"] = true;
+    filter["departureList"][i]["servingLine"]["direction"] = true;
+    filter["departureList"][i]["servingLine"]["symbol"] = true;
+    filter["departureList"][i]["realtimeStatus"] = true;
+    filter["departureList"][i]["realtimeTripStatus"] = true;
+    filter["departureList"][i]["realtimeDepartureTime"] = true;
+    filter["departureList"][i]["plannedDepartureTime"] = true;
+  }
 
   DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   if (error) {
-    // Serial.print(F("deserializeJson() failed: "));
-    // Serial.println(error.f_str());
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
     return;
   }
 
   JsonObject obj = doc.as<JsonObject>();
   const char *stopName = obj["dm"]["points"]["point"]["name"];
 
-  // Entferne den Stadt-Namen
+  // Stationsname extrahieren
   const char *c = stopName;
   for (int i = 0; i < strlen(c); i++)
     if (c[i] == ',') {
       for (i++; c[i] == ' '; i++);
       stopName = c + i;
+      break;
     }
 
   struct tm timeinfo;
@@ -120,17 +143,17 @@ void parse_reply(Stream &payload) {
 
   // Hintergrund für Stationsname
   display.fillRect(0, 0, display.width(), SKIP, GxEPD_BLACK);
-
-  // Stationsname
+  String convertedStopName = convertStopName(String(stopName));
   display.setTextColor(GxEPD_WHITE);
   display.setCursor(LEFT, TOP);
-  display.print(utf8ascii(stopName));
+  display.print(utf8ascii(convertedStopName));
 
   // Sortiere Abfahrten nach Countdown
-  int order[obj["departureList"].size()];
-  for (size_t i = 0; i < obj["departureList"].size(); i++) order[i] = i;
-  for (size_t i = 0; i < obj["departureList"].size() - 1; i++) {
-    for (size_t j = i + 1; j < obj["departureList"].size(); j++) {
+  int departureCount = min(LIMIT, (int)obj["departureList"].size());
+  int order[departureCount];
+  for (int i = 0; i < departureCount; i++) order[i] = i;
+  for (int i = 0; i < departureCount - 1; i++) {
+    for (int j = i + 1; j < departureCount; j++) {
       int ci = obj["departureList"][order[i]]["countdown"];
       int cj = obj["departureList"][order[j]]["countdown"];
       if (ci > cj) {
@@ -142,144 +165,90 @@ void parse_reply(Stream &payload) {
   }
 
   int displayedEntries = 0;
-  for (int i = 0; i < obj["departureList"].size() && displayedEntries < 6; i++) {
-    JsonObject nobj = obj["departureList"][i];
+  for (int i = 0; i < departureCount && displayedEntries < LIMIT; i++) {
+    JsonObject nobj = obj["departureList"][order[i]];
     const char *direction = nobj["servingLine"]["direction"];
-    char *c = (char*)direction;
-    while (*c && *c != '>') c++;
-    if (*c) {
-      c--;
-      while (*c == ' ') c--;
-      c[1] = '\0';
-    }
-
-    String destination(direction);
+    char *d = (char*)direction;
+    while (*d && *d != '>') d++;
+    if (*d) *d = '\0';
+    String destination = convertStopName(String(direction));
     const char *route = nobj["servingLine"]["symbol"];
-    int countdown = atoi(nobj["countdown"]);
+    int countdown = nobj["countdown"];
 
-    // Überspringe Fahrten in den nächsten 5 Minuten
-    if (countdown <= 5) {
+    // Überspringe Fahrten in den nächsten 1 Minute
+    if (countdown <= 1) {
+      Serial.print("Übersprunge Abfahrt mit Countdown ");
+      Serial.println(countdown);
       continue;
     }
-    
-    // ==========================================================
-    // LOGIK ZUR VERSPÄTUNGS- UND ABBRUCH-ERKENNUNG
-    // ==========================================================
-    bool isDelayed = false;
-    bool isCancelled = false;
 
-    // Prüfen auf Abbruch-Status
+    // Verspätung/Absage prüfen
+    bool isCancelled = false;
+    bool isDelayed = false;
     const char* realtimeStatus = nobj["realtimeStatus"] | "";
     const char* realtimeTripStatus = nobj["realtimeTripStatus"] | "";
-    
+
     if (strcmp(realtimeStatus, "TRIP_CANCELLED") == 0 || strcmp(realtimeTripStatus, "TRIP_CANCELLED") == 0) {
-        isCancelled = true;
+      isCancelled = true;
+    }
+    if (strcmp(realtimeStatus, "DELAYED") == 0 || strcmp(realtimeTripStatus, "DELAYED") == 0) {
+      isDelayed = true;
     }
 
-    // Nur prüfen auf Verspätung, wenn nicht abgesagt
-    if (!isCancelled && nobj.containsKey("realDateTime") && nobj.containsKey("dateTime")) {
-        struct tm realDepTime;
-        struct tm scheduledDepTime;
-        
-        parse_time(&realDepTime, nobj["realDateTime"]);
-        parse_time(&scheduledDepTime, nobj["dateTime"]);
-        
-        int realMinutes = realDepTime.tm_hour * 60 + realDepTime.tm_min;
-        int scheduledMinutes = scheduledDepTime.tm_hour * 60 + scheduledDepTime.tm_min;
-
-        if (realMinutes > scheduledMinutes) {
-            isDelayed = true;
-        }
+    // Falls realtimeDepartureTime und plannedDepartureTime verfügbar sind:
+    if (nobj.containsKey("realtimeDepartureTime") && nobj.containsKey("plannedDepartureTime")) {
+      long long realtimeDep = nobj["realtimeDepartureTime"];
+      long long plannedDep = nobj["plannedDepartureTime"];
+      if (delay > 0) {
+        isDelayed = true;
+      }
     }
-    // ==========================================================
 
-    struct tm deptime;
-    
-    // Verwende die Zeit, die angezeigt werden soll: Real-Time (falls vorhanden und nicht abgesagt) oder Plan-Zeit
-    if (nobj.containsKey("realDateTime") && !isCancelled) {
-        parse_time(&deptime, nobj["realDateTime"]);
-    } else {
-        parse_time(&deptime, nobj["dateTime"]);
-    }
-    
+    // Zeit formatieren (immer mit "min")
     char time[8];
     if (countdown <= 0) strcpy(time, "sofort");
-    else if (countdown < 10) sprintf(time, "%d min", countdown);
-    else sprintf(time, "%d:%02d", deptime.tm_hour, deptime.tm_min); 
+    else sprintf(time, "%dmin", countdown);
 
-    uint16_t routeWidth, destWidth, timeWidth;
-    routeWidth = get_dsp_length(route);
-    timeWidth = get_dsp_length(time);
-    
-    // Y-Koordinate der aktuellen Text-Baseline
+    // Anzeige vorbereiten
+    uint16_t routeWidth = get_dsp_length(route);
+    uint16_t timeWidth = get_dsp_length(time);
     int currentY = TOP + SKIP + SKIP * displayedEntries;
 
     // Hintergrund für Routen-Nummer
     display.fillRect(0, currentY - SKIP + 5, COL0_WIDTH, SKIP - 2, GxEPD_RED);
-
-    // Routen-Nummer
-    // Route Rot färben, wenn abgesagt, ansonsten Weiß
-    if (isCancelled) {
-         display.setTextColor(GxEPD_RED);
-    } else {
-         display.setTextColor(GxEPD_WHITE);
-    }
-    
+    display.setTextColor(isCancelled ? GxEPD_RED : GxEPD_WHITE);
     display.setCursor((COL0_WIDTH - routeWidth) / 2, currentY);
     display.print(route);
-    
-    // Ziel
-    display.setTextColor(GxEPD_BLACK); 
-    destWidth = get_dsp_length(destination);
 
-    // Kürzung des Zielnamens (wie im Originalcode)
-    if (COL0_WIDTH + LEFT + destWidth >= display.width() - timeWidth - LEFT) {
-      destination.concat("...");
-      destWidth = get_dsp_length(destination);
-      while (COL0_WIDTH + LEFT + destWidth >= display.width() - timeWidth - LEFT) {
-        destination = destination.substring(0, destination.length() - 4);
-        destination.concat("...");
-        destWidth = get_dsp_length(destination);
+    // Dynamische Kürzung des Zielnamens
+    uint16_t maxDestWidth = display.width() - COL0_WIDTH - LEFT - timeWidth - LEFT;
+    String displayDestination = destination;
+    uint16_t destWidth = get_dsp_length(displayDestination);
+    if (destWidth > maxDestWidth) {
+      while (destWidth > maxDestWidth && displayDestination.length() > 0) {
+        displayDestination = displayDestination.substring(0, displayDestination.length() - 1);
+        destWidth = get_dsp_length(displayDestination + "...");
       }
+      displayDestination += "...";
     }
+
+    display.setTextColor(GxEPD_BLACK);
     display.setCursor(COL0_WIDTH + LEFT, currentY);
-    display.print(utf8ascii(destination));
-    
-    // ==========================================================
-    // ZEICHNE DIE ZEIT & DURCHSTREICHEN
-    // ==========================================================
-    
-    // 1. Setze die Farbe für die Zeit
-    if (isCancelled || isDelayed) {
-        display.setTextColor(GxEPD_RED); // Rot bei Absage ODER Verspätung
-    } else {
-        display.setTextColor(GxEPD_BLACK); // Schwarz bei Pünktlichkeit
-    }
-    
-    // 2. Zeichne die Zeit
+    display.print(utf8ascii(displayDestination));
+
+    // Zeit anzeigen (rot bei Verspätung oder Absage)
+    display.setTextColor((isCancelled || isDelayed) ? GxEPD_RED : GxEPD_BLACK);
     uint16_t timeX = display.width() - timeWidth - LEFT;
-    uint16_t timeY = currentY;
-    
-    display.setCursor(timeX, timeY);
+    display.setCursor(timeX, currentY);
     display.print(time);
-    
-    // 3. Durchstreichen, wenn abgesagt
+
+    // Durchstreichen, wenn abgesagt
     if (isCancelled) {
-      // Bestimme die Textgrenzen der gezeichneten Zeit für die korrekte Position der Linie
       int16_t x1, y1;
       uint16_t w1, h1;
-      // Hier ist es wichtig, dass die `time` Variable verwendet wird, die gerade gezeichnet wurde
-      display.getTextBounds(time, timeX, timeY, &x1, &y1, &w1, &h1);
-      
-      // Die Y-Position für die Durchstreichung, basierend auf der tatsächlichen Höhe (h1)
-      // `y1` ist die y-Koordinate der oberen Grenze. Die Linie wird von dort + 2/3 der Höhe gezeichnet.
-      int lineY = y1 + h1 * 2 / 3; 
-      
-      // Zeichne die rote Linie
-      // Der Startpunkt ist `timeX`, die Länge ist `timeWidth`
-      display.drawLine(timeX, lineY, timeX + timeWidth, lineY, GxEPD_RED);
+      display.getTextBounds(time, timeX, currentY, &x1, &y1, &w1, &h1);
+      display.drawLine(timeX, y1 + h1 * 2 / 3, timeX + timeWidth, y1 + h1 * 2 / 3, GxEPD_RED);
     }
-    // ==========================================================
 
     displayedEntries++;
   }
@@ -291,13 +260,12 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println("WiFi connection establishing...");
-  Serial.println();
 
   WiFi.mode(WIFI_STA);
   WiFiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
   WiFi.config(IPAddress(), IPAddress(), IPAddress(), IPAddress(8, 8, 8, 8));
 
-  while ((WiFiMulti.run() != WL_CONNECTED)) {
+  while (WiFiMulti.run() != WL_CONNECTED) {
     Serial.print('.');
     digitalWrite(LED_BUILTIN, HIGH);
     delay(50);
@@ -315,11 +283,16 @@ void setup() {
   HTTPClient https;
   https.setTimeout(10000);
 
-  Serial.print("[HTTPS] begin...\n");
-  if (https.begin(*client, "https://185.201.144.208/sl3-alone/XSLT_DM_REQUEST?"
-        "outputFormat=JSON&coordOutputFormat=WGS84[dd.ddddd]&depType=stopEvents&"
-        "locationServerActive=1&mode=direct&name_dm=7001103&type_dm=stop&"
-        "useOnlyStops=1&useRealtime=1&limit=10")) {
+  String url = "https://projekte.kvv-efa.de/sl3-alone/XSLT_DM_REQUEST?"
+               "outputFormat=JSON&coordOutputFormat=WGS84[dd.ddddd]"
+               "&depType=stopEvents&locationServerActive=1&mode=direct"
+               "&name_dm=" STOP_ID
+               "&type_dm=stop&useOnlyStops=1&useRealtime=1"
+               "&limit=" + String(LIMIT);
+
+  Serial.print("[HTTPS] GET ");
+  Serial.println(url);
+  if (https.begin(*client, url)) {
     Serial.print("[HTTPS] GET...");
     int httpCode = https.GET();
     if (httpCode > 0) {
@@ -334,11 +307,12 @@ void setup() {
       Serial.printf("[HTTPS] Unable to connect\n");
     }
   }
-  Serial.println("Going to sleep ...");
- ESP.deepSleep(0);
+  Serial.println("Going to sleep...");
+  ESP.deepSleep(0);
 }
 
 void loop() {
+  // This should never be reached
   Serial.printf("loop() should never be reached!\n");
   delay(1000);
 }
